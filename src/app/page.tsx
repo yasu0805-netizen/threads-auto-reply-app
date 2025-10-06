@@ -1,123 +1,155 @@
 'use client'
 
-import { useState, useEffect } from 'react'
-import { ChatBubbleLeftRightIcon, Cog6ToothIcon, PlusIcon } from '@heroicons/react/24/outline'
+import { useState, useEffect, useCallback } from 'react'
 import { fetchReplies, ThreadReply } from '../api/threads'
+import { ReplyList } from '../components/ReplyList'
+import { DraftPanel } from '../components/DraftPanel'
+import { StyleSelector } from '../components/StyleSelector'
+import { ErrorBanner } from '../components/ErrorBanner'
+import { useAppContext } from '../context/AppContext'
 
-// モックデータ
-const mockReplies = [
-  {
-    id: 1,
-    username: '@user123',
-    content: 'おはよう！今日もよろしく✨',
-    timestamp: '5分前',
-    avatar: '👩',
-  },
-  {
-    id: 2,
-    username: '@follower456',
-    content: '占い当たってました！すごい👏',
-    timestamp: '15分前',
-    avatar: '🧑',
-  },
-  {
-    id: 3,
-    username: '@newbie789',
-    content: 'はじめまして！フォローしました💕',
-    timestamp: '1時間前',
-    avatar: '👱‍♀️',
-  },
-]
+interface Draft { id: string; text: string; createdAt: number }
 
 export default function Home() {
-  const [activeTab, setActiveTab] = useState('replies')
-  const [replies, setReplies] = useState<ThreadReply[]>(mockReplies)
+  const { userStyle } = useAppContext()
+  const [activeTab, setActiveTab] = useState<'replies' | 'drafts'>('replies')
+  const [replies, setReplies] = useState<ThreadReply[]>([])
+  const [loadingReplies, setLoadingReplies] = useState(false)
+  const [drafts, setDrafts] = useState<Draft[]>([])
+  const [streamingText, setStreamingText] = useState<string | null>(null)
+  const [generating, setGenerating] = useState(false)
+  const [error, setError] = useState<string>('')
+  const [selectedReply, setSelectedReply] = useState<ThreadReply | null>(null)
+  const [abortCtrl, setAbortCtrl] = useState<AbortController | null>(null)
 
   useEffect(() => {
-    fetchReplies().then((data) => setReplies(data))
+    setLoadingReplies(true)
+    fetchReplies().then(d => setReplies(d)).finally(() => setLoadingReplies(false))
   }, [])
 
-  return (
-    <div className="min-h-screen bg-gray-50">
-      {/* Header */}
-      <header className="bg-white shadow-sm border-b">
-        <div className="max-w-md mx-auto px-4 py-3 flex items-center justify-between">
-          <h1 className="text-lg font-semibold text-gray-900">Threads Auto Reply</h1>
-          <button className="p-2 text-gray-500 hover:text-gray-700">
-            <Cog6ToothIcon className="w-6 h-6" />
-          </button>
-        </div>
-      </header>
+  const finalizeDraft = useCallback((text: string) => {
+    const now = Date.now()
+    setDrafts(prev => [{ id: `${now}-${Math.random().toString(36).slice(2)}`, text, createdAt: now }, ...prev])
+  }, [])
 
-      {/* Tab Navigation */}
-      <nav className="bg-white border-b">
-        <div className="max-w-md mx-auto px-4">
-          <div className="flex space-x-8">
-            <button
-              onClick={() => setActiveTab('replies')}
-              className={`py-3 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'replies'
-                  ? 'border-primary-500 text-primary-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              受信リプライ
-            </button>
-            <button
-              onClick={() => setActiveTab('drafts')}
-              className={`py-3 px-1 border-b-2 font-medium text-sm ${
-                activeTab === 'drafts'
-                  ? 'border-primary-500 text-primary-600'
-                  : 'border-transparent text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              下書き
-            </button>
-          </div>
-        </div>
+  const handleGenerate = useCallback(async (reply: ThreadReply) => {
+    if (generating) return
+    setError('')
+    setSelectedReply(reply)
+    setGenerating(true)
+    setStreamingText('')
+
+    const controller = new AbortController()
+    setAbortCtrl(controller)
+
+    try {
+      const res = await fetch('/api/generate-reply', {
+        method: 'POST',
+        body: JSON.stringify({ style: userStyle, originalMessage: reply.content }),
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+      })
+      if (!res.body) throw new Error('ストリームが開始できません')
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder('utf-8')
+      let done = false
+      let fullText = ''
+
+      while (!done) {
+        const { value, done: readerDone } = await reader.read()
+        done = readerDone
+        if (value) {
+          const chunk = decoder.decode(value)
+          fullText += chunk
+          // チャンク内に ERROR が含まれる場合即終了
+          if (chunk.startsWith('ERROR:')) {
+            const msg = chunk.replace(/^ERROR:\s?/, '').trim()
+            setError(msg || '生成エラー')
+            break
+          }
+          if (fullText.includes('\n[DONE]')) {
+            const cleaned = fullText.replace('\n[DONE]', '')
+            setStreamingText(cleaned)
+            finalizeDraft(cleaned.trim())
+            setActiveTab('drafts')
+            break
+          }
+          setStreamingText(fullText)
+        }
+      }
+    } catch (e: any) {
+      if (e.name === 'AbortError') {
+        setError('生成をキャンセルしました')
+      } else {
+        setError(e.message || '生成に失敗しました')
+      }
+    } finally {
+      setGenerating(false)
+      setAbortCtrl(null)
+    }
+  }, [generating, userStyle, finalizeDraft])
+
+  const handleClearDrafts = () => {
+    setDrafts([])
+    setStreamingText(null)
+  }
+
+  const handleRegenerate = () => {
+    if (selectedReply) handleGenerate(selectedReply)
+  }
+
+  const handleCopy = (text: string) => {
+    navigator.clipboard.writeText(text).catch(() => setError('クリップボードへコピーできませんでした'))
+  }
+
+  const handleCancel = () => {
+    if (abortCtrl) {
+      abortCtrl.abort()
+    }
+  }
+
+  return (
+    <div className="max-w-2xl mx-auto p-4 space-y-6">
+      <ErrorBanner message={error} onClose={() => setError('')} />
+
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold text-gray-900">Threads Auto Reply</h1>
+        {generating && <button onClick={handleCancel} className="text-xs px-2 py-1 border rounded hover:bg-red-50 border-red-300 text-red-600">キャンセル</button>}
+      </div>
+
+      <section>
+        <h2 className="text-sm font-medium text-gray-600 mb-2">文体プリセット</h2>
+        <StyleSelector />
+      </section>
+
+      <nav className="flex gap-6 border-b text-sm">
+        {(['replies','drafts'] as const).map(tab => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab)}
+            className={`pb-2 -mb-px border-b-2 transition ${activeTab === tab ? 'border-primary-600 text-primary-600 font-medium' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+          >
+            {tab === 'replies' ? '受信リプライ' : '下書き'}
+          </button>
+        ))}
       </nav>
 
-      {/* Content */}
-      <main className="max-w-md mx-auto">
-        {activeTab === 'replies' && (
-          <div className="divide-y divide-gray-200">
-            <div className="space-y-4">
-              {replies.map((reply) => (
-                <div key={reply.id} className="bg-white p-4 rounded-lg shadow-md">
-                  <div className="flex items-start space-x-3">
-                    <div className="text-2xl">{reply.avatar}</div>
-                    <div className="flex-1">
-                      <p className="text-sm font-medium text-gray-900">{reply.username}</p>
-                      <p className="text-sm text-gray-700 mt-1">{reply.content}</p>
-                    </div>
-                  </div>
-                  <button className="mt-3 flex items-center px-3 py-1.5 border border-primary-600 text-primary-600 text-sm font-medium rounded-md hover:bg-primary-50">
-                    <ChatBubbleLeftRightIcon className="w-4 h-4 mr-1" />
-                    返信下書きを作成
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+      {activeTab === 'replies' && (
+        <ReplyList replies={replies} loading={loadingReplies} onGenerate={handleGenerate} />
+      )}
+      {activeTab === 'drafts' && (
+        <DraftPanel
+          drafts={drafts}
+          streamingText={streamingText}
+          generating={generating}
+          onClear={handleClearDrafts}
+          onRegenerate={handleRegenerate}
+          onCopy={handleCopy}
+        />
+      )}
 
-        {activeTab === 'drafts' && (
-          <div className="p-8 text-center">
-            <ChatBubbleLeftRightIcon className="mx-auto h-12 w-12 text-gray-400" />
-            <h3 className="mt-2 text-sm font-medium text-gray-900">下書きがありません</h3>
-            <p className="mt-1 text-sm text-gray-500">
-              リプライに対して返信下書きを作成してみましょう。
-            </p>
-          </div>
-        )}
-      </main>
-
-      {/* Floating Action Button */}
-      <div className="fixed bottom-6 right-6">
-        <button className="bg-primary-600 text-white rounded-full p-3 shadow-lg hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2">
-          <PlusIcon className="w-6 h-6" />
-        </button>
-      </div>
+      {generating && <p className="text-xs text-primary-600">生成中...</p>}
     </div>
   )
 }
