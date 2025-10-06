@@ -1,8 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'export',
-  basePath: '/<リポジトリ名>',
-  assetPrefix: '/<リポジトリ名>/',
+  // VercelでSSR/Edge機能を使えるよう static export を解除
+  reactStrictMode: true,
+  // もし今後 Image Optimization や Middleware を使うならここに追記
 };
 
 module.exports = nextConfig;
