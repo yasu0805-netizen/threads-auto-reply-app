@@ -3,6 +3,7 @@ import { Inter } from 'next/font/google'
 import './globals.css'
 import { AppProvider } from '../context/AppContext'
 import { Cog6ToothIcon } from '@heroicons/react/24/outline'
+import { SpeedInsights } from '@vercel/speed-insights/next'
 
 const inter = Inter({ subsets: ['latin'] })
 
@@ -31,6 +32,7 @@ export default function RootLayout({
             <p className="text-sm">&copy; 2025 Threads Auto Reply</p>
           </footer>
         </AppProvider>
+        <SpeedInsights />
       </body>
     </html>
   )
